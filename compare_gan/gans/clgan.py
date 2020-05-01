@@ -46,9 +46,9 @@ def random_crop_and_resize(images, ratio=0.8):
   return crop
 
 def random_apply(fn, image, prob=1.):
-  if random.random() > prob:
-    return image
-  return fn(image)
+  b, *_ = image.get_shape().as_list()
+  chance = tf.less(tf.random_uniform([b], 0, 1.0), prob)
+  return tf.where(chance, fn(image), tf.identity(image))
 
 def color_distortion(image, s=1.0):
   lower, upper, x = (1 - 0.8 * s), (1 + 0.8 * s), image
@@ -139,7 +139,7 @@ class CLGAN(modular_gan.ModularGAN):
       imgs = random_crop_and_resize(imgs)
       imgs = random_apply(color_distortion, imgs, self._aug_color_jitter_prob)
       imgs = random_apply(color_drop, imgs, self._aug_color_drop_prob)
-      return imgs
+      return tf.stop_gradient(imgs)
 
     aug_images, aug_generated = augment(images), augment(generated)
 
@@ -169,8 +169,8 @@ class CLGAN(modular_gan.ModularGAN):
         discriminator=self.discriminator, architecture=self._architecture)
     self.d_loss += self._lambda * penalty_loss
 
-    z_projs = tf.concat([z_projs_real, z_aug_projs_real], 0)
-    z_aug_projs = tf.concat([z_projs_fake, z_aug_projs_fake], 0)
+    z_projs = tf.concat([z_projs_real, z_projs_fake], 0)
+    z_aug_projs = tf.concat([z_aug_projs_real, z_aug_projs_fake], 0)
 
     sims_logits = tf.matmul(z_projs, z_aug_projs, transpose_b=True)
     logits_max = tf.reduce_max(sims_logits,1)

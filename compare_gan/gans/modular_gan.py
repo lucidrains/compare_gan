@@ -673,3 +673,6 @@ class ModularGAN(AbstractGAN):
         x=images, x_fake=generated, y=y, is_training=is_training,
         discriminator=self.discriminator)
     self.d_loss += self._lambda * penalty_loss
+
+    if hasattr(self.discriminator, '_quantize_loss') and self.discriminator._quantize_loss is not None:
+      self.d_loss += self.discriminator._quantize_loss

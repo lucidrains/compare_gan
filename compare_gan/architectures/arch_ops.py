@@ -834,3 +834,81 @@ def non_local_block(x, name, use_sn):
     attn_g = conv1x1(attn_g, num_channels, name="conv2d_attn_g", use_sn=use_sn,
                      use_bias=False)
     return x + sigma * attn_g
+
+# vector quantize function
+@gin.configurable(blacklist=["inputs", "name", "is_training"])
+def vector_quantize(inputs, name = 'vector_quantize', is_training=True, embedding_dim=512,
+             num_embeddings=2**8,
+             decay=0.8, commitment_cost=1.0,
+             epsilon=1e-5,
+                       **_kwargs):
+    _embedding_dim = embedding_dim
+    _num_embeddings = num_embeddings
+    _decay = decay
+    _commitment_cost = commitment_cost
+    _epsilon = epsilon
+
+    # w is a matrix with an embedding in each column. When training, the
+    # embedding is assigned to be the average of all inputs assigned to that
+    # embedding.
+    embedding_shape = [embedding_dim, num_embeddings]
+
+    with tf.variable_scope(name):
+      _w = tf.get_variable(
+          'embedding', embedding_shape,
+          initializer=tf.variance_scaling_initializer(), use_resource=True)
+      _ema_cluster_size = tf.get_variable(
+          'ema_cluster_size', [num_embeddings],
+          initializer=tf.constant_initializer(0), use_resource=True)
+      _ema_w = tf.get_variable(
+          'ema_dw', initializer=_w.initialized_value(), use_resource=True)
+
+      inputs.set_shape([None, None, None, embedding_dim])
+
+      def quantize(encoding_indices):
+          with tf.control_dependencies([encoding_indices]):
+              w = tf.transpose(_w.read_value(), [1, 0])
+          return tf.nn.embedding_lookup(w, encoding_indices, validate_indices=False)
+
+      with tf.control_dependencies([inputs]):
+          w = _w.read_value()
+      input_shape = tf.shape(inputs)
+      with tf.control_dependencies([
+          tf.Assert(tf.equal(input_shape[-1], _embedding_dim),
+                    [input_shape])]):
+          flat_inputs = tf.reshape(inputs, [-1, _embedding_dim])
+
+      distances = (tf.reduce_sum(flat_inputs ** 2, 1, keepdims=True)
+                   - 2 * tf.matmul(flat_inputs, w)
+                   + tf.reduce_sum(w ** 2, 0, keepdims=True))
+
+      encoding_indices = tf.argmax(- distances, 1)
+      encodings = tf.one_hot(encoding_indices, _num_embeddings)
+      encoding_indices = tf.reshape(encoding_indices, tf.shape(inputs)[:-1])
+      quantized = quantize(encoding_indices)
+      e_latent_loss = tf.reduce_mean((tf.stop_gradient(quantized) - inputs) ** 2, axis=[1, 2, 3])
+
+      if is_training:
+          updated_ema_cluster_size = moving_averages.assign_moving_average(
+              _ema_cluster_size, tf.reduce_sum(encodings, 0), _decay)
+          dw = tf.matmul(flat_inputs, encodings, transpose_a=True)
+          updated_ema_w = moving_averages.assign_moving_average(_ema_w, dw,
+                                                                _decay)
+          n = tf.reduce_sum(updated_ema_cluster_size)
+          updated_ema_cluster_size = (
+                  (updated_ema_cluster_size + _epsilon)
+                  / (n + _num_embeddings * _epsilon) * n)
+          # print('here')
+          normalised_updated_ema_w = (
+                  updated_ema_w / tf.reshape(updated_ema_cluster_size, [1, -1]))
+          with tf.control_dependencies([e_latent_loss]):
+              update_w = tf.assign(_w, normalised_updated_ema_w)
+              with tf.control_dependencies([update_w]):
+                  loss = _commitment_cost * e_latent_loss
+      else:
+          loss = _commitment_cost * e_latent_loss
+      quantized = inputs + tf.stop_gradient(quantized - inputs)
+      avg_probs = tf.reduce_mean(encodings, 0)
+      perplexity = tf.exp(- tf.reduce_sum(avg_probs * tf.log(avg_probs + 1e-10)))
+
+      return quantized, loss

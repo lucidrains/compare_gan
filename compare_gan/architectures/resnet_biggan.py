@@ -309,6 +309,7 @@ class Discriminator(abstract_arch.AbstractDiscriminator):
   def __init__(self,
                ch=96,
                blocks_with_attention="B1",
+               blocks_with_quantization=None,
                project_y=True,
                **kwargs):
     """Constructor for BigGAN discriminator.
@@ -324,6 +325,9 @@ class Discriminator(abstract_arch.AbstractDiscriminator):
     self._ch = ch
     self._blocks_with_attention = set(blocks_with_attention.split(","))
     self._project_y = project_y
+
+    self._blocks_with_quantization = [] if blocks_with_quantization is None else set(blocks_with_quantization.split(","))
+    self._quantize_loss = None
 
   def _resnet_block(self, name, in_channels, out_channels, scale):
     """ResNet block for the generator."""
@@ -384,6 +388,10 @@ class Discriminator(abstract_arch.AbstractDiscriminator):
     num_blocks = len(in_channels)
 
     net = x
+
+    if len(self._blocks_with_quantization) > 0:
+      self._quantize_loss = 0
+
     for block_idx in range(num_blocks):
       name = "B{}".format(block_idx + 1)
       is_last_block = block_idx == num_blocks - 1
@@ -398,6 +406,16 @@ class Discriminator(abstract_arch.AbstractDiscriminator):
                      net.shape)
         net = ops.non_local_block(net, "non_local_block",
                                   use_sn=self._spectral_norm)
+
+      if name in self._blocks_with_quantization:
+        net, q_loss = ops.vector_quantize(
+          net,
+          "V{}".format(block_idx + 1),
+          is_training = is_training,
+          embedding_dim = out_channels[block_idx]
+        )
+
+        self._quantize_loss += tf.reduce_mean(q_loss)
 
     # Final part
     logging.info("[Discriminator] before final processing: %s", net.shape)
